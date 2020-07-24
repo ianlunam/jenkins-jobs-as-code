@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Jenkins ECS cluster with EIP
+Parameters:
+    EcsClusterName:
+        Type: String
+        Description: Name of the service, this will be used for the name of all resources created (Autoscaling Group Load balancer, EC2 instances...
+        MinLength: '7'
+        Default: jenkins-cluster
+    ProjectTag:
+        Type: String
+        Default: my-project
+        Description: Project tag to be applied for billing purpose
+    SshKeyName:
+        Type: AWS::EC2::KeyPair::KeyName
+        Description: Name of an existing EC2 KeyPair to enable SSH access to the ECS instances
+        Default: AwsVpcKey
+    DesiredCapacity:
+        Type: Number
+        Default: '1'
+        Description: Number of instances to launch in your ECS cluster
+    MinSize:
+        Type: Number
+        Default: '1'
+        Description: Minimum number of instances that can be launched in your ECS cluster
+    MaxSize:
+        Type: Number
+        Default: '1'
+        Description: Maximum number of instances that can be launched in your ECS cluster
+    VpcStackName:
+        Type: String
+        Default: my-vpc-stack
+        Description: Network resource stack name
+    InstanceType:
+        Description: The EC2 instance type
+        Type: String
+        Default: c5.4xlarge
+        AllowedValues:
+            - t2.nano
+            - t2.micro
+            - t2.small
+            - t2.medium
+            - m5.xlarge
+            - m5.large
+            - m4.large
+            - m4.xlarge
+            - c5.xlarge
+            - c5.4xlarge
+        ConstraintDescription: must be a valid EC2 instance type.
+    LambdaPushLogsToS3AndEs:
+        Type: String
+        Description: >-
+            Name of the lambda (handel-cwl) which invokes both Lambda's cwl-to-s3 and
+            cwl-to-es which pushes logs from Cloudwatch to S3 for audit purposes and to
+            Elasticsearch.Not required in Dev.Leave blank when not required.
+        Default: ''
+    RolesStackName:
+        Type: String
+        Description: Cloudformation stack name that defined the IAM roles
+        Default: my-iam-roles
+    EipAllocationId:
+        Type: String
+        Description: Jenkins Eip Allocation Id
+        Default: eipalloc-XXXXXXXXXXX
+    VolumeSize:
+        Type: String
+        Description: Jenkins volume size
+        Default: '50'
+Conditions:
+    UseLambdaPushLogsToS3AndEs: !Not
+        -   !Equals
+            -   !Ref 'LambdaPushLogsToS3AndEs'
+            -   ''
+Mappings:
+    AWSRegionToAMI:
+        eu-west-1:
+            AMIID: ami-078df974
+        eu-central-1:
+            AMIID: ami-d3cf3ebc
+Resources:
+    ECSCluster:
+        Type: AWS::ECS::Cluster
+    AutoScalingGroup:
+        Type: AWS::AutoScaling::AutoScalingGroup
+        Properties:
+            VPCZoneIdentifier: !Split
+                -   ','
+                -   !ImportValue
+                        Fn::Sub: ${VpcStackName}-PrivateSubnets
+            LaunchConfigurationName: !Ref 'ContainerInstances'
+            MinSize: !Ref 'MinSize'
+            MaxSize: !Ref 'MaxSize'
+            DesiredCapacity: !Ref 'DesiredCapacity'
+            Tags:
+                -   Key: Name
+                    Value: !Ref 'EcsClusterName'
+                    PropagateAtLaunch: 'true'
+                -   Key: Project
+                    Value: !Ref 'ProjectTag'
+                    PropagateAtLaunch: 'true'
+        CreationPolicy:
+            ResourceSignal:
+                Timeout: PT15M
+        UpdatePolicy:
+            AutoScalingScheduledAction:
+                IgnoreUnmodifiedGroupSizeProperties: 'true'
+            AutoScalingRollingUpdate:
+                MinInstancesInService: '1'
+                MaxBatchSize: '1'
+                PauseTime: PT5M
+                WaitOnResourceSignals: 'true'
+    ContainerInstances:
+        Type: AWS::AutoScaling::LaunchConfiguration
+        Metadata:
+            AWS::CloudFormation::Init:
+                config:
+                    commands:
+                        '00_configure_awslogs':
+                            command: !Join
+                                -   ''
+                                -   - "#!/bin/bash\n"
+                                    - sed -i 's/nofile=1024:4096/nofile=1024:65500 --log-driver=awslogs
+                                        --log-opt awslogs-group=
+                                    - !Ref 'CloudWatchLogs'
+                                    - " --icc=false /g' /etc/sysconfig/docker\n"
+                                    - "sync\n"
+                        '01_set_sysctl':
+                            command: !Join
+                                -   ''
+                                -   - "/bin/cat /tmp/sysctl.conf | /usr/bin/tee -a /etc/sysctl.conf\n"
+                                    - "/sbin/sysctl -e -p\n"
+                        '04_add_instance_to_cluster':
+                            command: !Join
+                                -   ''
+                                -   - "#!/bin/bash\n"
+                                    - ". /etc/profile\n"
+                                    - "yum install -y aws-cli\n"
+                                    - export AWS_DEFAULT_REGION=
+                                    - !Ref 'AWS::Region'
+                                    - "\n"
+                                    - "JENKINS_HOME=/var/jenkins_home\n"
+                                    - "SONAR_HOME=/var/sonar_home\n"
+                                    - "TMP_LOG=/tmp/jenkinsVol.txt\n"
+                                    - "aws s3 cp s3://my-configs/ecs/ecs.config /etc/ecs/docker.cfg\n"
+                                    - "cat /etc/ecs/docker.cfg >> /etc/ecs/ecs.config\n"
+                                    - "yum install -y nfs-utils\n"
+                                    - aws configure set preview.efs true
+                                    - "\n"
+                                    - mkdir ${JENKINS_HOME}
+                                    - "\n"
+                                    - mkdir ${SONAR_HOME}
+                                    - "\n"
+                                    - chmod 777 ${JENKINS_HOME}
+                                    - "\n"
+                                    - chmod 777 ${SONAR_HOME}
+                                    - "\n"
+                                    - echo `ls -ld ${JENKINS_HOME}` > ${TMP_LOG} 2>&1
+                                    - "\n"
+                                    - groupadd -g 1000 jenkins
+                                    - "\n"
+                                    - useradd -u 1000 -g 1000 -r jenkins
+                                    - "\n"
+                                    - chown jenkins:jenkins ${JENKINS_HOME}
+                                    - "\n"
+                                    - cp -p /etc/fstab /etc/fstab.back-$(date +%F)
+                                    - "\n"
+                                    - service docker stop
+                                    - "\n"
+                                    - service docker start
+                                    - "\n"
+                                    - echo `ls -ld ${JENKINS_HOME}` > ${TMP_LOG} 2>&1
+                                    - "\n"
+                                    - echo `ls -lrt ${JENKINS_HOME}` > ${TMP_LOG} 2>&1
+                                    - "\n"
+                        '05_associate_eip':
+                            command: !Join
+                                -   ''
+                                -   - "#!/bin/bash\n"
+                                    - "\n"
+                                    - "# Associate manually chosen EIP address\n"
+                                    - 'aws ec2 associate-address --instance-id `curl http://169.254.169.254/latest/meta-data/instance-id`
+                                        --allocation-id '
+                                    - !Ref 'EipAllocationId'
+                                    - ' --region '
+                                    - !Ref 'AWS::Region'
+                                    - "\n"
+                    files:
+                        /etc/cfn/cfn-hup.conf:
+                            content: !Join
+                                -   ''
+                                -   - "[main]\n"
+                                    - stack=
+                                    - !Ref 'AWS::StackId'
+                                    - "\n"
+                                    - region=
+                                    - !Ref 'AWS::Region'
+                                    - "\n"
+                            mode: '000400'
+                            owner: root
+                            group: root
+                        /etc/cfn/hooks.d/cfn-auto-reloader.conf:
+                            content: !Join
+                                -   ''
+                                -   - "[cfn-auto-reloader-hook]\n"
+                                    - "triggers=post.update\n"
+                                    - "path=Resources.ContainerInstances.Metadata.AWS::CloudFormation::Init\n"
+                                    - 'action=/opt/aws/bin/cfn-init -v '
+                                    - '                 --stack '
+                                    - !Ref 'AWS::StackName'
+                                    - '                 --resource ContainerInstances '
+                                    - '                 --region '
+                                    - !Ref 'AWS::Region'
+                                    - "\n"
+                                    - "runas=root\n"
+                    services:
+                        sysvinit:
+                            cfn-hup:
+                                enabled: 'true'
+                                ensureRunning: 'true'
+                                files:
+                                    - /etc/cfn/cfn-hup.conf
+                                    - /etc/cfn/hooks.d/cfn-auto-reloader.conf
+        Properties:
+            BlockDeviceMappings:
+                -   DeviceName: /dev/xvda
+                    Ebs:
+                        VolumeSize: !Ref 'VolumeSize'
+            AssociatePublicIpAddress: true
+            InstanceType: !Ref 'InstanceType'
+            SecurityGroups: !Split
+                -   ','
+                -   !ImportValue
+                        Fn::Sub: ${VpcStackName}-JenkinsSecurityGroupId
+            ImageId: !FindInMap
+                - AWSRegionToAMI
+                - !Ref 'AWS::Region'
+                - AMIID
+            IamInstanceProfile: !Ref 'EC2InstanceProfile'
+            KeyName: !Ref 'SshKeyName'
+            UserData: !Base64
+                Fn::Join:
+                    -   ''
+                    -   - "Content-Type: multipart/mixed; boundary=\"==BOUNDARY==\"\n"
+                        - "MIME-Version: 1.0\n"
+                        - "\n"
+                        - "--==BOUNDARY==\n"
+                        - "Content-Type: text/cloud-config; charset=\"utf-8\"\n"
+                        - "MIME-Version: 1.0\n"
+                        - "Content-Transfer-Encoding: 7bit\n"
+                        - "Content-Disposition: attachment; filename=\"cloud.cfg\"\n"
+                        - "\n"
+                        - "#cloud-config\n"
+                        - "repo_upgrade: none\n"
+                        - "package_upgrade: true\n"
+                        - "packages:\n"
+                        - " - aws-cfn-bootstrap\n"
+                        - "runcmd:\n"
+                        - " - set -x\n"
+                        - ' - /opt/aws/bin/cfn-init -v'
+                        - ' --stack '
+                        - !Ref 'AWS::StackName'
+                        - ' --resource ContainerInstances'
+                        - ' --region '
+                        - !Ref 'AWS::Region'
+                        - "\n"
+                        - ' - /opt/aws/bin/cfn-signal -e $?'
+                        - ' --stack '
+                        - !Ref 'AWS::StackName'
+                        - ' --resource AutoScalingGroup'
+                        - ' --region '
+                        - !Ref 'AWS::Region'
+                        - "\n"
+                        - " - set +x\n"
+                        - "\n"
+                        - "--==BOUNDARY==\n"
+                        - "Content-Type: text/cloud-boothook; charset=\"utf-8\"\n"
+                        - "MIME-Version: 1.0\n"
+                        - "Content-Transfer-Encoding: 7bit\n"
+                        - "Content-Disposition: attachment; filename=\"cloudboothook.cfg\"\n"
+                        - "\n"
+                        - "#cloud-boothook\n"
+                        - ECS_CLUSTER_NAME=
+                        - !Ref 'ECSCluster'
+                        - "\n"
+                        - "if [ ! -f /var/lib/cloud/instance/sem/config_ecs-agent_http_proxy\
+                            \ ]; then\n"
+                        - "echo \"ECS_CLUSTER=$ECS_CLUSTER_NAME\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"ECS_SELINUX_CAPABLE=true\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"ECS_AVAILABLE_LOGGING_DRIVERS=[\\\"json-file\\\",\\\"awslogs\\\
+                            \"]\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"ECS_ENABLE_TASK_IAM_ROLE=true\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"ECS_ENABLE_TASK_IAM_ROLE_NETWORK_HOST=true\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"ECS_DISABLE_PRIVILEGED=true\" >> /etc/ecs/ecs.config\n"
+                        - "echo \"$$: $(date +%s.%N | cut -b1-13)\" > /var/lib/cloud/instance/sem/config_ecs-agent_http_proxy\n"
+                        - "fi\n"
+                        - "\n"
+                        - --==BOUNDARY==
+    EC2InstanceProfile:
+        Type: AWS::IAM::InstanceProfile
+        Properties:
+            Path: /
+            Roles:
+                -   !ImportValue
+                        Fn::Sub: ${RolesStackName}-JenkinsEc2Role
+    LambdaInvokePermission:
+        Type: AWS::Lambda::Permission
+        Condition: UseLambdaPushLogsToS3AndEs
+        Properties:
+            FunctionName: !Join
+                -   ''
+                -   - 'arn:aws:lambda:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':function:'
+                    - !Ref 'LambdaPushLogsToS3AndEs'
+            Action: lambda:*
+            Principal: !Join
+                -   ''
+                -   - logs.
+                    - !Ref 'AWS::Region'
+                    - .amazonaws.com
+            SourceArn: !GetAtt 'CloudWatchLogs.Arn'
+            SourceAccount: !Ref 'AWS::AccountId'
+    CloudWatchLogs:
+        Type: AWS::Logs::LogGroup
+        Properties:
+            LogGroupName: !Join
+                -   ''
+                -   - !Ref 'ProjectTag'
+                    - '-'
+                    - !Ref 'EcsClusterName'
+            RetentionInDays: 3653
+    SubscriptionFilter:
+        Type: AWS::Logs::SubscriptionFilter
+        Condition: UseLambdaPushLogsToS3AndEs
+        DependsOn:
+            - LambdaInvokePermission
+            - CloudWatchLogs
+        Properties:
+            LogGroupName: !Join
+                -   ''
+                -   - !Ref 'ProjectTag'
+                    - '-'
+                    - !Ref 'EcsClusterName'
+            FilterPattern: ''
+            DestinationArn: !Join
+                -   ''
+                -   - 'arn:aws:lambda:'
+                    - !Ref 'AWS::Region'
+                    - ':'
+                    - !Ref 'AWS::AccountId'
+                    - ':function:'
+                    - !Ref 'LambdaPushLogsToS3AndEs'
+Outputs:
+    EcsClusterId:
+        Description: Ecs Cluster Id
+        Value: !Ref 'ECSCluster'
+        Export:
+            Name: !Sub '${AWS::StackName}-EcsClusterId'
+    LaunchConfigId:
+        Description: Launch Config Id
+        Value: !Ref 'ContainerInstances'
+        Export:
+            Name: !Sub '${AWS::StackName}-LaunchConfigId'
+    JenkinsEip:
+        Description: Jenkins Instance Eip
+        Value: !Ref 'EipAllocationId'
+        Export:
+            Name: !Sub '${AWS::StackName}-JenkinsEip'
+    AutoScalingGroupInstanceIds:
+        Description: Auto Scaling Group EC2 Instance Id's
+        Value: !Base64
+            Fn::Join:
+                -   ''
+                -   - ''
+                    - "#!/bin/bash -x\n"
+                    - aws ec2 describe-instances --filters "Name=tag:aws:autoscaling:groupName,
+                    - Values=
+                    - !Ref 'AutoScalingGroup'
+                    - '"'
+                    - '"Name=instance-state-name,Values=running"'
+                    - ' --query "Reservations[*].Instances[*].InstanceId" --output text'
+        Export:
+            Name: !Sub '${AWS::StackName}-AutoScalingGroupInstanceIds'
+    LogGroup:
+        Value: !Ref 'CloudWatchLogs'
+        Export:
+            Name: !Sub '${AWS::StackName}-LogGroup'

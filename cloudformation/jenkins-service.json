@@ -1,0 +1,498 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Description": "Jenkins service for Jenkins Ecs",
+    "Parameters": {
+        "Domain": {
+            "Description": "The domain of the service",
+            "Type": "String",
+            "Default": "example.com",
+            "AllowedValues": [
+                "example.com"
+            ]
+        },
+        "Subdomain": {
+            "Description": "The DNS for the microservice",
+            "Type": "String",
+            "Default": "jenkins"
+        },
+        "ContainerName": {
+            "Type": "String",
+            "Description": "Name of the container that will be used for the container instances.",
+            "MinLength": "7",
+            "Default": "jenkins"
+        },
+        "DockerMemory": {
+            "Type": "Number",
+            "Description": "Amount of memory to be allocated to the docker process on the container instance",
+            "Default": "20480"
+        },
+        "DockerRepo": {
+            "Type": "String",
+            "Description": "Docker repository",
+            "Default": "XXXXXXXXXXX.dkr.ecr.eu-west-1.amazonaws.com"
+        },
+        "LoadBalancerPort": {
+            "Type": "Number",
+            "Description": "Exposed Load Balancer Port",
+            "Default": "80"
+        },
+        "HostPort": {
+            "Type": "Number",
+            "Description": "Exposed Host Port",
+            "Default": "80"
+        },
+        "ContainerPort": {
+            "Type": "Number",
+            "Description": "The internal container port that will be exposed by the docker engine",
+            "Default": "8080"
+        },
+        "HealthEndpoint": {
+            "Type": "String",
+            "Default": "/login",
+            "Description": "Container health url e.g. /${context}/health"
+        },
+        "DesiredContainerCount": {
+            "Type": "Number",
+            "Description": "The number of docker containers to run in ECS cluster",
+            "Default": "1"
+        },
+        "RepoVersion": {
+            "Type": "String",
+            "Description": "Docker image tag",
+            "Default": "latest"
+        },
+        "JenkinsHome": {
+            "Type": "String",
+            "Description": "Jenkins Home path",
+            "Default": "/var/jenkins_home"
+        },
+        "JenkinsEmail": {
+            "Type": "String",
+            "Description": "Jenkins Email Address",
+            "Default": "jenkins@example.com"
+        },
+        "JenkinsUrl": {
+            "Type": "String",
+            "Description": "Jenkins URL",
+            "Default": "http://jenkins.example.com/"
+        },
+        "NexusHostName": {
+            "Type": "String",
+            "Default": "nexus.example.com",
+            "Description": "Nexus artifactory host name"
+        },
+        "NexusPublicIp": {
+            "Type": "String",
+            "Default": "8.8.8.8",
+            "Description": "Nexus public IP"
+        },
+        "ProjectTag": {
+            "Type": "String",
+            "Default": "jenkins",
+            "Description": "Project tag to be applied for billing purpose"
+        },
+        "EcsClusterName": {
+            "Type": "String",
+            "Default": "jenkins-cluster",
+            "Description": "Build cluster name"
+        },
+        "VpcStackName": {
+            "Type": "String",
+            "Default": "my-vpc",
+            "Description": "Network resource stack name"
+        },
+        "LogGroup": {
+            "Type": "String",
+            "Description": "Use the ECS cluster log group for sending container logs to cloud watch.",
+            "Default": "my-jenkins-cluster"
+        },
+        "BuildNumber": {
+            "Type": "String",
+            "Description": "Jenkins build number",
+            "Default": ""
+        },
+        "DockerFileLimit": {
+            "Type": "String",
+            "Default": "65535",
+            "Description": "Docker container file limit."
+        },
+        "RolesStackName": {
+            "Type": "String",
+            "Description": "Cloudformation stack name that defined the IAM roles",
+            "Default": "my-iam-roles"
+        }
+    },
+    "Resources": {
+        "TaskDefinition": {
+            "Type": "AWS::ECS::TaskDefinition",
+            "Properties": {
+                "ContainerDefinitions": [
+                    {
+                        "Name": {
+                            "Ref": "ContainerName"
+                        },
+                        "Cpu": "10",
+                        "Essential": "true",
+                        "LogConfiguration": {
+                            "LogDriver": "awslogs",
+                            "Options": {
+                                "awslogs-group": {
+                                    "Ref": "LogGroup"
+                                },
+                                "awslogs-region": {
+                                    "Ref": "AWS::Region"
+                                },
+                                "awslogs-stream-prefix": {
+                                    "Fn::Sub": "${AWS::StackName}"
+                                }
+                            }
+                        },
+                        "Image": {
+                            "Fn::Join": [
+                                "",
+                                [
+                                    {
+                                        "Ref": "DockerRepo"
+                                    },
+                                    "/",
+                                    {
+                                        "Ref": "ContainerName"
+                                    },
+                                    ":",
+                                    {
+                                        "Ref": "RepoVersion"
+                                    }
+                                ]
+                            ]
+                        },
+                        "Memory": {
+                            "Ref": "DockerMemory"
+                        },
+                        "Environment": [
+                            {
+                                "Name": "JENKINS_HOME",
+                                "Value": {
+                                    "Ref": "JenkinsHome"
+                                }
+                            },
+                            {
+                                "Name": "JENKINS_EMAIL",
+                                "Value": {
+                                    "Ref": "JenkinsEmail"
+                                }
+                            },
+                            {
+                                "Name": "JENKINS_URL",
+                                "Value": {
+                                    "Ref": "JenkinsUrl"
+                                }
+                            },
+                            {
+                                "Name": "JAVA_OPTS",
+                                "Value": {
+                                    "Fn::Join": [
+                                        "",
+                                        [
+                                            "-Xms8192m",
+                                            " ",
+                                            "-Xmx16384m",
+                                            " ",
+                                            "-XX:MaxMetaspaceSize=1024m",
+                                            " ",
+                                            "-Djenkins.install.runSetupWizard=false"
+                                        ]
+                                    ]
+                                }
+                            }
+                        ],
+                        "ExtraHosts": [
+                            {
+                                "Hostname": {
+                                    "Ref": "NexusHostName"
+                                },
+                                "IpAddress": {
+                                    "Ref": "NexusPublicIp"
+                                }
+                            }
+                        ],
+                        "PortMappings": [
+                            {
+                                "HostPort": {
+                                    "Ref": "HostPort"
+                                },
+                                "ContainerPort": {
+                                    "Ref": "ContainerPort"
+                                }
+                            }
+                        ],
+                        "MountPoints": [
+                            {
+                                "SourceVolume": "docker-sock",
+                                "ContainerPath": "/var/run/docker.sock"
+                            }
+                        ],
+                        "Ulimits": [
+                            {
+                                "Name": "nofile",
+                                "SoftLimit": {
+                                    "Ref": "DockerFileLimit"
+                                },
+                                "HardLimit": {
+                                    "Ref": "DockerFileLimit"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                "Volumes": [
+                    {
+                        "Host": {
+                            "SourcePath": "/var/run/docker.sock"
+                        },
+                        "Name": "docker-sock"
+                    }
+                ]
+            }
+        },
+        "EcsService": {
+            "Type": "AWS::ECS::Service",
+            "Properties": {
+                "Cluster": {
+                    "Fn::ImportValue": {
+                        "Fn::Sub": "${EcsClusterName}-EcsClusterId"
+                    }
+                },
+                "DesiredCount": {
+                    "Ref": "DesiredContainerCount"
+                },
+                "LoadBalancers": [
+                    {
+                        "ContainerName": {
+                            "Ref": "ContainerName"
+                        },
+                        "ContainerPort": {
+                            "Ref": "ContainerPort"
+                        },
+                        "LoadBalancerName": {
+                            "Ref": "EcsElasticLoadBalancer"
+                        }
+                    }
+                ],
+                "Role": {
+                    "Fn::ImportValue": {
+                        "Fn::Sub": "${RolesStackName}-EcsServiceRole"
+                    }
+                },
+                "DeploymentConfiguration": {
+                    "MaximumPercent": 100,
+                    "MinimumHealthyPercent": 0
+                },
+                "TaskDefinition": {
+                    "Ref": "TaskDefinition"
+                }
+            }
+        },
+        "myDNSRecord": {
+            "Type": "AWS::Route53::RecordSet",
+            "Properties": {
+                "HostedZoneName": {
+                    "Fn::Join": [
+                        "",
+                        [
+                            {
+                                "Ref": "Domain"
+                            },
+                            "."
+                        ]
+                    ]
+                },
+                "Comment": "DNS name for my instance.",
+                "Name": {
+                    "Fn::Join": [
+                        ".",
+                        [
+                            {
+                                "Ref": "Subdomain"
+                            },
+                            {
+                                "Ref": "Domain"
+                            }
+                        ]
+                    ]
+                },
+                "Type": "CNAME",
+                "TTL": "60",
+                "ResourceRecords": [
+                    {
+                        "Fn::GetAtt": [
+                            "EcsElasticLoadBalancer",
+                            "DNSName"
+                        ]
+                    }
+                ]
+            }
+        },
+        "EcsElasticLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+            "Properties": {
+                "SecurityGroups": {
+                    "Fn::Split": [
+                        ",",
+                        {
+                            "Fn::ImportValue": {
+                                "Fn::Sub": "${VpcStackName}-JenkinsSecurityGroupId"
+                            }
+                        }
+                    ]
+                },
+                "Subnets": {
+                    "Fn::Split": [
+                        ",",
+                        {
+                            "Fn::ImportValue": {
+                                "Fn::Sub": "${VpcStackName}-PrivateSubnets"
+                            }
+                        }
+                    ]
+                },
+                "Listeners": [
+                    {
+                        "LoadBalancerPort": {
+                            "Ref": "LoadBalancerPort"
+                        },
+                        "InstancePort": {
+                            "Ref": "HostPort"
+                        },
+                        "Protocol": "HTTP"
+                    }
+                ],
+                "HealthCheck": {
+                    "Target": {
+                        "Fn::Join": [
+                            "",
+                            [
+                                "HTTP:",
+                                {
+                                    "Ref": "HostPort"
+                                },
+                                {
+                                    "Ref": "HealthEndpoint"
+                                }
+                            ]
+                        ]
+                    },
+                    "HealthyThreshold": "2",
+                    "UnhealthyThreshold": "10",
+                    "Interval": "30",
+                    "Timeout": "5"
+                },
+                "Scheme": "internal",
+                "Tags": [
+                    {
+                        "Key": "Project",
+                        "Value": {
+                            "Ref": "ProjectTag"
+                        }
+                    }
+                ]
+            }
+        },
+        "lookupStackResources": {
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "Code": {
+                    "ZipFile": {
+                        "Fn::Join": [
+                            "\n",
+                            [
+                                "var response = require('cfn-response');",
+                                "exports.handler = function(event, context) {",
+                                "    console.log('REQUEST RECEIVED:\\n', JSON.stringify(event));",
+                                "    if (event.RequestType == 'Delete') {",
+                                "        response.send(event, context, response.SUCCESS);",
+                                "        return;",
+                                "    }",
+                                "    var stackName = event.ResourceProperties.StackName;",
+                                "    var responseData = {};",
+                                "    if (stackName) {",
+                                "        var aws = require('aws-sdk');",
+                                "        var cfn = new aws.CloudFormation();",
+                                "        cfn.describeStacks({StackName: stackName}, function(err, data) {",
+                                "            if (err) {",
+                                "                responseData = {Error: 'DescribeStacks call failed'};",
+                                "                console.log(responseData.Error + ':\\n', err);",
+                                "                response.send(event, context, response.FAILED, responseData);",
+                                "            }",
+                                "            else {",
+                                "                data.Stacks[0].Outputs.forEach(function(output) {",
+                                "                    responseData[output.OutputKey] = output.OutputValue;",
+                                "                });",
+                                "                response.send(event, context, response.SUCCESS, responseData);",
+                                "            }",
+                                "        });",
+                                "    } else {",
+                                "        responseData = {Error: 'Stack name not specified'};",
+                                "        console.log(responseData.Error);",
+                                "        response.send(event, context, response.FAILED, responseData);",
+                                "    }",
+                                "};"
+                            ]
+                        ]
+                    }
+                },
+                "Runtime": "nodejs8.10",
+                "Role": {
+                    "Fn::ImportValue": {
+                        "Fn::Sub": "${RolesStackName}-ServiceLambdaExecutionRoleArn"
+                    }
+                },
+                "Timeout": "30",
+                "Handler": "index.handler"
+            }
+        }
+    },
+    "Outputs": {
+        "EcsService": {
+            "Value": {
+                "Ref": "EcsService"
+            }
+        },
+        "EcsClusterId": {
+            "Value": {
+                "Fn::ImportValue": {
+                    "Fn::Sub": "${EcsClusterName}-EcsClusterId"
+                }
+            }
+        },
+        "TaskDefinition": {
+            "Value": {
+                "Ref": "TaskDefinition"
+            }
+        },
+        "Url": {
+            "Value": {
+                "Fn::Join": [
+                    "",
+                    [
+                        "http://",
+                        {
+                            "Ref": "Subdomain"
+                        },
+                        ".",
+                        {
+                            "Ref": "Domain"
+                        },
+                        {
+                            "Ref": "HealthEndpoint"
+                        }
+                    ]
+                ]
+            }
+        },
+        "LogGroup": {
+            "Value": {
+                "Ref": "LogGroup"
+            }
+        }
+    }
+}

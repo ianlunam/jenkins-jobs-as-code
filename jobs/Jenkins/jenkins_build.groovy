@@ -5,7 +5,7 @@ buildMonitorView("Jenkins") {
         regex(".*Jenkins.*")
     }
 }
-freeStyleJob("Jenkins/optimised-jenkins-build") {
+freeStyleJob("Jenkins/jenkins-build") {
     description("None")
     steps {
         shell("./build-jenkins.sh")
